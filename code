@@ -1,0 +1,215 @@
+#include <Wire.h>
+#include <LiquidCrystal_I2C.h>
+#include <string.h>
+#define BTN_GAS_MASUK   2
+#define BTN_GAS_KELUAR  3
+#define BTN_CUST_MASUK  4
+#define BTN_CUST_KELUAR 5
+
+#define LED_HIJAU 10
+#define LED_MERAH 11
+#define BUZZER    12
+
+LiquidCrystal_I2C lcd(0x27, 16, 2);
+
+#define KAPASITAS_STACK 5
+struct Tabung { int id; char status[6]; };
+struct Tabung tumpukan[KAPASITAS_STACK];
+int top = -1;
+int nextGasId = 1;
+
+void initStack(){ top = -1; }
+bool stackKosong(){ return top == -1; }
+bool stackPenuh(){ return top == KAPASITAS_STACK - 1; }
+int stackSize(){ return top + 1; }
+void pushGas(int id, const char* s){
+  if (stackPenuh()) return;
+  top++;
+  tumpukan[top].id = id;
+  strncpy(tumpukan[top].status, s, sizeof(tumpukan[top].status)-1);
+  tumpukan[top].status[sizeof(tumpukan[top].status)-1] = '\0';
+}
+struct Tabung popGas(){
+  struct Tabung kosong; kosong.id = 0; strcpy(kosong.status, "NONE");
+  if (stackKosong()) return kosong;
+  return tumpukan[top--];
+}
+struct Tabung lihatAtas(){
+  struct Tabung kosong; kosong.id = 0; strcpy(kosong.status, "NONE");
+  return stackKosong() ? kosong : tumpukan[top];
+}
+#define KAPASITAS_QUEUE 3
+struct Queue { int data[KAPASITAS_QUEUE]; int front; int rear; int count; };
+struct Queue q;
+int nextCustId = 1;
+
+void initQueue(struct Queue* qu){ qu->front = 0; qu->rear = -1; qu->count = 0; }
+bool qKosong(struct Queue* qu){ return qu->count == 0; }
+bool qPenuh(struct Queue* qu){ return qu->count >= KAPASITAS_QUEUE; }
+bool enqueue(struct Queue* qu, int id){
+  if (qPenuh(qu)) return false;
+  qu->rear = (qu->rear + 1) % KAPASITAS_QUEUE;
+  qu->data[qu->rear] = id;
+  qu->count++;
+  return true;
+}
+bool dequeue(struct Queue* qu, int* id){
+  if (qKosong(qu)) return false;
+  *id = qu->data[qu->front];
+  qu->front = (qu->front + 1) % KAPASITAS_QUEUE;
+  qu->count--;
+  return true;
+}
+
+int gasDiCustomer = 0;         
+char lcdStatus[17] = "";        
+
+void tulisBaris2(const char* s){
+  char buf[17];
+  strncpy(buf, s, 16); buf[16] = '\0';
+  int len = strlen(buf);
+  for (int i = len; i < 16; i++) buf[i] = ' ';
+  buf[16] = '\0';
+  lcd.setCursor(0,1);
+  lcd.print(buf);
+}
+
+void updateLCD(){
+  lcd.clear();
+  lcd.setCursor(0,0);
+  lcd.print("Stok:");
+  lcd.print(stackSize());
+  lcd.print(" Antri:");
+  lcd.print(q.count);
+  tulisBaris2(lcdStatus);
+}
+
+void updateLED(){
+  if (stackSize() > 0) { digitalWrite(LED_HIJAU, HIGH); digitalWrite(LED_MERAH, LOW); }
+  else { digitalWrite(LED_HIJAU, LOW); digitalWrite(LED_MERAH, HIGH); }
+}
+
+void beep(int n){
+  for (int i = 0; i < n; i++){
+    tone(BUZZER, 1000, 100);
+    delay(150);
+  }
+}
+bool tombolDitekanLow(int pin, unsigned long* lastWaktu, unsigned long now){
+  const unsigned long jedaDebounce = 200UL;
+  if (now - *lastWaktu < jedaDebounce) return false;
+  if (digitalRead(pin) == LOW) {
+    delay(40);
+    if (digitalRead(pin) == LOW) {
+      *lastWaktu = now;
+      return true;
+    }
+  }
+  return false;
+}
+void setup(){
+  Serial.begin(9600);
+  lcd.init();     
+  lcd.backlight();
+  lcd.setCursor(0,0); lcd.print("Toko Gas LPG");
+  lcd.setCursor(0,1); lcd.print("Inisialisasi...");
+  delay(700);
+
+  pinMode(BTN_GAS_MASUK, INPUT_PULLUP);
+  pinMode(BTN_GAS_KELUAR, INPUT_PULLUP);
+  pinMode(BTN_CUST_MASUK, INPUT_PULLUP);
+  pinMode(BTN_CUST_KELUAR, INPUT_PULLUP);
+  pinMode(LED_HIJAU, OUTPUT);
+  pinMode(LED_MERAH, OUTPUT);
+  pinMode(BUZZER, OUTPUT);
+  digitalWrite(LED_MERAH, HIGH); 
+  initStack();
+  initQueue(&q);
+  strcpy(lcdStatus, "Siap");
+  updateLCD();
+  delay(500);
+  Serial.println("Stack siap");
+  Serial.println("Queue siap");
+}
+
+void loop(){
+  static unsigned long lastUpdate = 0;
+  static unsigned long lastBtn[4] = {0,0,0,0};
+  unsigned long now = millis();
+  if (tombolDitekanLow(BTN_GAS_MASUK, &lastBtn[0], now)) {
+    if (!stackPenuh()) {
+      pushGas(nextGasId, "FULL");
+      snprintf(lcdStatus, sizeof(lcdStatus), "Gas #%d Masuk", nextGasId);
+      Serial.print("GAS MASUK: Tabung #"); Serial.print(nextGasId); Serial.print(" | Stok: "); Serial.println(stackSize());
+      nextGasId++;
+      beep(1);
+    } else {
+      strcpy(lcdStatus, "Stok Penuh!");
+      Serial.println("ERROR: Stack penuh!");
+      beep(3);
+    }
+  }
+
+  if (tombolDitekanLow(BTN_GAS_KELUAR, &lastBtn[1], now)) {
+    if (gasDiCustomer == 0) {
+      struct Tabung g = popGas();
+      if (g.id > 0) {
+        gasDiCustomer = g.id;
+        snprintf(lcdStatus, sizeof(lcdStatus), "Gas #%d di Cust", g.id);
+        Serial.print("GAS KELUAR: Tabung #"); Serial.print(g.id); Serial.println(" diberikan ke customer");
+        beep(1);
+      } else {
+        strcpy(lcdStatus, "Stok Kosong!");
+        Serial.println("ERROR: Stok kosong!");
+        beep(3);
+      }
+    } else {
+      strcpy(lcdStatus, "Sudah ada gas!");
+      Serial.println("ERROR: Sudah ada gas di customer!");
+      beep(3);
+    }
+  }
+
+  if (tombolDitekanLow(BTN_CUST_MASUK, &lastBtn[2], now)) {
+    if (enqueue(&q, nextCustId)) {
+      snprintf(lcdStatus, sizeof(lcdStatus), "Cust #%d Antri", nextCustId);
+      Serial.print("CUSTOMER MASUK: #"); Serial.print(nextCustId); Serial.print(" antri | Antrian: "); Serial.println(q.count);
+      nextCustId++;
+      beep(1);
+    } else {
+      strcpy(lcdStatus, "Antrian Penuh!");
+      Serial.println("ERROR: Antrian penuh!");
+      beep(3);
+    }
+  }
+
+  if (tombolDitekanLow(BTN_CUST_KELUAR, &lastBtn[3], now)) {
+    if (!qKosong(&q)) {
+      int cust;
+      if (dequeue(&q, &cust)) {
+        if (gasDiCustomer > 0) {
+          Serial.println("========================================");
+          Serial.print("TRANSAKSI: Customer #"); Serial.print(cust); Serial.print(" membeli Tabung #"); Serial.println(gasDiCustomer);
+          Serial.print("Stok: "); Serial.print(stackSize()); Serial.print(" | Antrian: "); Serial.println(q.count);
+          Serial.println("========================================");
+          strcpy(lcdStatus, "Cust Out");
+          beep(2);
+          gasDiCustomer = 0;
+        } else {
+          Serial.print("Customer #"); Serial.print(cust); Serial.println(" keluar tanpa beli");
+          snprintf(lcdStatus, sizeof(lcdStatus), "Cust #%d Batal", cust);
+          beep(1);
+        }
+      }
+    } else {
+      strcpy(lcdStatus, "Antri Kosong!");
+      Serial.println("ERROR: Tidak ada customer!");
+      beep(3);
+    }
+  }
+  if (now - lastUpdate >= 500UL) {
+    lastUpdate = now;
+    updateLCD();
+    updateLED();
+  }
+}
